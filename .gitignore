@@ -1,0 +1,45 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+.venv_demo/
+venv/
+ENV/
+env/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Outputs / caches
+out/
+out/models/data/
+
+# Model weights / large artifacts
+models/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+
+# Logs
+*.log
+
+data/
+outputs/
+demo/node_modules/
