@@ -232,7 +232,6 @@ class SamDataEngine:
         item = self.next_pending(dataset)
         return {
             "dataset": dataset,
-            "modelUrl": f"/model/{self.quantized_model_path.name}",
             "progress": self.get_progress(dataset),
             "item": self.serialize_item(item) if item else None,
         }
@@ -543,11 +542,39 @@ class SamDataEngine:
 
         with self._prompt_lock:
             predictor, item = self._ensure_predictor_state(dataset, item_id)
-            point_coords = np.array([[float(click["x"]), float(click["y"])] for click in clicks], dtype=np.float32)
-            point_labels = np.array([int(click["clickType"]) for click in clicks], dtype=np.int32)
+            point_clicks = [click for click in clicks if int(click["clickType"]) in (0, 1)]
+            box_clicks = [click for click in clicks if int(click["clickType"]) in (2, 3)]
+
+            point_coords = (
+                np.array([[float(click["x"]), float(click["y"])] for click in point_clicks], dtype=np.float32)
+                if point_clicks
+                else None
+            )
+            point_labels = (
+                np.array([int(click["clickType"]) for click in point_clicks], dtype=np.int32)
+                if point_clicks
+                else None
+            )
+            box = None
+            if box_clicks:
+                top_left = next((click for click in box_clicks if int(click["clickType"]) == 2), None)
+                bottom_right = next((click for click in box_clicks if int(click["clickType"]) == 3), None)
+                if top_left is None or bottom_right is None:
+                    raise ValueError("Box prompt requires both top-left and bottom-right corners.")
+                box = np.array(
+                    [
+                        float(top_left["x"]),
+                        float(top_left["y"]),
+                        float(bottom_right["x"]),
+                        float(bottom_right["y"]),
+                    ],
+                    dtype=np.float32,
+                )
+
             masks, scores, _ = predictor.predict(
                 point_coords=point_coords,
                 point_labels=point_labels,
+                box=box,
                 multimask_output=False,
                 return_logits=False,
             )

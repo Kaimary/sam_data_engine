@@ -55,11 +55,6 @@ class SkipItemPayload(BaseModel):
     note: str | None = None
 
 
-@app.on_event("startup")
-def prepare_demo_assets() -> None:
-    engine.ensure_quantized_model()
-
-
 @app.get("/api/bootstrap")
 def bootstrap(dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
     payload = engine.bootstrap_payload(dataset)
