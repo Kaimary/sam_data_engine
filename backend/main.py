@@ -37,6 +37,8 @@ class AnnotationPayload(BaseModel):
     clicks: list[dict[str, Any]] = Field(default_factory=list)
     maskPngDataUrl: str
     color: str | None = None
+    source: str | None = None
+    score: float | None = None
 
 
 class PredictMaskPayload(BaseModel):
@@ -127,6 +129,16 @@ def predict_mask(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - surfaced to UI
         raise HTTPException(status_code=500, detail=f"Failed to predict mask: {exc}") from exc
+
+
+@app.get("/api/items/{item_id}/automatic-masks")
+def automatic_masks(item_id: str, dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
+    try:
+        return engine.automatic_masks(dataset=dataset, item_id=item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - surfaced to UI
+        raise HTTPException(status_code=500, detail=f"Failed to generate automatic masks: {exc}") from exc
 
 
 @app.post("/api/items/{item_id}/complete")

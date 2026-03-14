@@ -40,6 +40,7 @@ class SamDataEngine:
         self.data_root = project_root / "data"
         self.output_root = project_root / "outputs"
         self.embedding_root = self.output_root / "embeddings"
+        self.auto_mask_root = self.output_root / "automatic_masks"
         self.state_root = self.output_root / "annotations"
         self.checkpoint_path = self._resolve_checkpoint()
         self.model_type = self._infer_model_type(self.checkpoint_path.name)
@@ -54,6 +55,7 @@ class SamDataEngine:
             for dataset, items in self._items.items()
         }
         self._predictor = None
+        self._automatic_mask_generator = None
         self._predictor_item: tuple[str, str] | None = None
         self._device = None
         self._embedding_lock = threading.Lock()
@@ -61,6 +63,7 @@ class SamDataEngine:
         self._prompt_lock = threading.Lock()
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.embedding_root.mkdir(parents=True, exist_ok=True)
+        self.auto_mask_root.mkdir(parents=True, exist_ok=True)
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.float_model_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -154,6 +157,14 @@ class SamDataEngine:
         path = self.embedding_root / dataset
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _dataset_auto_mask_dir(self, dataset: str, item_id: str) -> Path:
+        path = self.auto_mask_root / dataset / item_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _auto_mask_manifest_path(self, dataset: str, item_id: str) -> Path:
+        return self._dataset_auto_mask_dir(dataset, item_id) / "manifest.json"
 
     def _state_path(self, dataset: str, item_id: str) -> Path:
         return self._dataset_state_dir(dataset) / f"{item_id}.json"
@@ -289,6 +300,28 @@ class SamDataEngine:
         print(f"[engine] loaded SAM image encoder on {device}")
         return predictor
 
+    def _load_automatic_mask_generator(self):
+        if self._automatic_mask_generator is not None:
+            return self._automatic_mask_generator
+
+        predictor = self._load_predictor()
+        sys.path.insert(0, str(self.segment_root))
+        from segment_anything import SamAutomaticMaskGenerator
+
+        self._automatic_mask_generator = SamAutomaticMaskGenerator(
+            predictor.model,
+            points_per_side=16,
+            points_per_batch=64,
+            pred_iou_thresh=0.86,
+            stability_score_thresh=0.90,
+            box_nms_thresh=0.7,
+            crop_n_layers=1,
+            crop_n_points_downscale_factor=2,
+            min_mask_region_area=0,
+            output_mode="binary_mask",
+        )
+        return self._automatic_mask_generator
+
     def ensure_embedding(self, dataset: str, item_id: str) -> Path:
         item = self.get_item(dataset, item_id)
         embedding_path = self._dataset_embedding_dir(dataset) / f"{item.id}.npy"
@@ -385,6 +418,119 @@ class SamDataEngine:
             "bbox": self._mask_bbox(binary > 0),
         }
 
+    @staticmethod
+    def _automatic_mask_palette() -> list[str]:
+        return ["#ff7a59", "#5abf90", "#4fa3ff", "#f6bd60", "#9d7bff", "#f28482"]
+
+    def _filter_automatic_masks(
+        self,
+        item: DataItem,
+        generated_masks: list[dict[str, Any]],
+        limit: int = 32,
+    ) -> list[dict[str, Any]]:
+        image_area = item.width * item.height
+        min_area = max(64, int(image_area * 0.001))
+        max_area = int(image_area * 0.98)
+        filtered = [
+            mask
+            for mask in generated_masks
+            if min_area <= int(mask.get("area", 0)) <= max_area
+        ]
+        if not filtered:
+            filtered = [mask for mask in generated_masks if int(mask.get("area", 0)) > 0]
+
+        filtered.sort(
+            key=lambda mask: (
+                int(mask.get("area", 0)),
+                float(mask.get("predicted_iou", 0.0)),
+                float(mask.get("stability_score", 0.0)),
+            ),
+            reverse=True,
+        )
+        return filtered[:limit]
+
+    def _automatic_mask_records_to_payload(
+        self,
+        dataset: str,
+        item_id: str,
+        records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for record in records:
+            mask_path = self.project_root / record["maskPath"]
+            with Image.open(mask_path) as image:
+                mask_array = np.array(image.convert("L")) > 0
+            payload = self._mask_layer_payload(mask_array.astype(np.uint8), record["color"])
+            payloads.append(
+                {
+                    "id": record["id"],
+                    "itemId": item_id,
+                    "dataset": dataset,
+                    "color": record["color"],
+                    "clicks": [],
+                    "source": "automatic",
+                    "score": record.get("score"),
+                    **payload,
+                }
+            )
+        return payloads
+
+    def automatic_masks(self, dataset: str, item_id: str) -> dict[str, Any]:
+        item = self.get_item(dataset, item_id)
+        manifest_path = self._auto_mask_manifest_path(dataset, item_id)
+        if manifest_path.exists():
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                records = json.load(handle)
+            return {
+                "dataset": dataset,
+                "itemId": item_id,
+                "masks": self._automatic_mask_records_to_payload(dataset, item_id, records),
+            }
+
+        with self._prompt_lock:
+            if manifest_path.exists():
+                with manifest_path.open("r", encoding="utf-8") as handle:
+                    records = json.load(handle)
+                return {
+                    "dataset": dataset,
+                    "itemId": item_id,
+                    "masks": self._automatic_mask_records_to_payload(dataset, item_id, records),
+                }
+
+            generator = self._load_automatic_mask_generator()
+            image = np.array(Image.open(item.image_path).convert("RGB"))
+            generated_masks = generator.generate(image)
+            filtered_masks = self._filter_automatic_masks(item, generated_masks)
+            palette = self._automatic_mask_palette()
+            mask_dir = self._dataset_auto_mask_dir(dataset, item_id)
+            records: list[dict[str, Any]] = []
+
+            for index, generated_mask in enumerate(filtered_masks, start=1):
+                mask_array = generated_mask["segmentation"].astype(np.uint8)
+                color = palette[(index - 1) % len(palette)]
+                payload = self._mask_layer_payload(mask_array, color)
+                mask_bytes = self.decode_data_url(payload["maskPngDataUrl"])
+                mask_path = mask_dir / f"mask_{index:03d}.png"
+                mask_path.write_bytes(mask_bytes)
+                records.append(
+                    {
+                        "id": f"{item_id}-auto-{index:03d}",
+                        "maskPath": str(mask_path.relative_to(self.project_root)),
+                        "color": color,
+                        "score": float(generated_mask.get("predicted_iou", 0.0)),
+                        "area": payload["area"],
+                        "bbox": payload["bbox"],
+                    }
+                )
+
+            manifest_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return {
+            "dataset": dataset,
+            "itemId": item_id,
+            "masks": self._automatic_mask_records_to_payload(dataset, item_id, records),
+        }
+
     def predict_mask(
         self,
         dataset: str,
@@ -469,6 +615,8 @@ class SamDataEngine:
                     "positiveClicks": sum(1 for click in clicks if click.get("clickType") == 1),
                     "negativeClicks": sum(1 for click in clicks if click.get("clickType") == 0),
                     "color": annotation.get("color"),
+                    "source": annotation.get("source") or "manual",
+                    "score": annotation.get("score"),
                 }
             )
 
