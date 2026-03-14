@@ -34,7 +34,7 @@ class SamDataEngine:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
         self.segment_root = project_root / "segment-anything"
-        self.demo_root = self.segment_root / "demo"
+        self.demo_root = self._resolve_demo_root()
         self.demo_dist = self.demo_root / "dist"
         self.demo_model_root = self.demo_root / "model"
         self.data_root = project_root / "data"
@@ -54,13 +54,21 @@ class SamDataEngine:
             for dataset, items in self._items.items()
         }
         self._predictor = None
+        self._predictor_item: tuple[str, str] | None = None
         self._device = None
         self._embedding_lock = threading.Lock()
         self._model_lock = threading.Lock()
+        self._prompt_lock = threading.Lock()
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.embedding_root.mkdir(parents=True, exist_ok=True)
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.float_model_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_demo_root(self) -> Path:
+        local_demo_root = self.project_root / "demo"
+        if local_demo_root.exists():
+            return local_demo_root
+        return self.segment_root / "demo"
 
     def _resolve_checkpoint(self) -> Path:
         checkpoint_dir = self.project_root / "checkpoint"
@@ -183,6 +191,14 @@ class SamDataEngine:
                 return item
         return None
 
+    def peek_next_pending(self, dataset: str, current_item_id: str) -> DataItem | None:
+        for item in self.get_items(dataset):
+            if item.id == current_item_id:
+                continue
+            if not self._state_path(dataset, item.id).exists():
+                return item
+        return None
+
     def serialize_item(self, item: DataItem) -> dict[str, Any]:
         return {
             "id": item.id,
@@ -262,7 +278,6 @@ class SamDataEngine:
         if self._predictor is not None:
             return self._predictor
         sys.path.insert(0, str(self.segment_root))
-        import torch
         from segment_anything import SamPredictor, sam_model_registry
 
         device = self._get_device()
@@ -289,6 +304,119 @@ class SamDataEngine:
             np.save(embedding_path, embedding)
             print(f"[engine] cached embedding for {item.id} at {embedding_path}")
         return embedding_path
+
+    def runtime_payload(self) -> dict[str, str]:
+        device = self._get_device()
+        return {
+            "location": "server",
+            "device": device,
+            "label": f"Server {device.upper()}",
+        }
+
+    def _ensure_predictor_state(self, dataset: str, item_id: str):
+        item = self.get_item(dataset, item_id)
+        predictor = self._load_predictor()
+        state_key = (dataset, item_id)
+        if self._predictor_item == state_key and predictor.is_image_set:
+            return predictor, item
+
+        embedding_path = self.ensure_embedding(dataset, item_id)
+        embedding = np.load(embedding_path)
+
+        import torch
+        from segment_anything.utils.transforms import ResizeLongestSide
+
+        features = torch.from_numpy(embedding).to(device=self._get_device())
+        input_size = ResizeLongestSide.get_preprocess_shape(
+            item.height, item.width, predictor.model.image_encoder.img_size
+        )
+
+        predictor.reset_image()
+        predictor.features = features
+        predictor.original_size = (item.height, item.width)
+        predictor.input_size = input_size
+        predictor.is_image_set = True
+        self._predictor_item = state_key
+        return predictor, item
+
+    @staticmethod
+    def _mask_bbox(mask_array: np.ndarray) -> list[int]:
+        ys, xs = np.where(mask_array)
+        if ys.size == 0 or xs.size == 0:
+            return [0, 0, 0, 0]
+        x0 = int(xs.min())
+        y0 = int(ys.min())
+        x1 = int(xs.max())
+        y1 = int(ys.max())
+        return [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
+
+    @staticmethod
+    def _png_data_url(image: Image.Image) -> str:
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+
+    @staticmethod
+    def _hex_to_rgba(color: str, alpha: int) -> tuple[int, int, int, int]:
+        normalized = color.lstrip("#")
+        if len(normalized) != 6:
+            raise ValueError(f"Expected RGB hex color, got: {color}")
+        return (
+            int(normalized[0:2], 16),
+            int(normalized[2:4], 16),
+            int(normalized[4:6], 16),
+            alpha,
+        )
+
+    def _mask_layer_payload(self, mask_array: np.ndarray, color: str) -> dict[str, Any]:
+        binary = mask_array.astype(np.uint8)
+        height, width = binary.shape
+        overlay_rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        overlay_rgba[binary > 0] = self._hex_to_rgba(color, 180)
+
+        mask_rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        mask_rgba[binary > 0] = (255, 255, 255, 255)
+
+        area = int(binary.sum())
+        return {
+            "overlayUrl": self._png_data_url(Image.fromarray(overlay_rgba, mode="RGBA")),
+            "maskPngDataUrl": self._png_data_url(Image.fromarray(mask_rgba, mode="RGBA")),
+            "area": area,
+            "bbox": self._mask_bbox(binary > 0),
+        }
+
+    def predict_mask(
+        self,
+        dataset: str,
+        item_id: str,
+        clicks: list[dict[str, Any]],
+        color: str = "#2e86ab",
+    ) -> dict[str, Any]:
+        if not clicks:
+            raise ValueError("At least one click is required for prediction.")
+
+        with self._prompt_lock:
+            predictor, item = self._ensure_predictor_state(dataset, item_id)
+            point_coords = np.array([[float(click["x"]), float(click["y"])] for click in clicks], dtype=np.float32)
+            point_labels = np.array([int(click["clickType"]) for click in clicks], dtype=np.int32)
+            masks, scores, _ = predictor.predict(
+                point_coords=point_coords,
+                point_labels=point_labels,
+                multimask_output=False,
+                return_logits=False,
+            )
+
+        mask = masks[0].astype(np.uint8)
+        payload = self._mask_layer_payload(mask, color)
+        return {
+            "itemId": item.id,
+            "dataset": dataset,
+            "color": color,
+            "score": float(scores[0]),
+            "width": item.width,
+            "height": item.height,
+            **payload,
+        }
 
     @staticmethod
     def decode_data_url(data_url: str) -> bytes:

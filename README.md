@@ -17,7 +17,13 @@
 
 ## 环境准备
 
-项目里原有 `.venv` 已损坏，这里使用新的虚拟环境 `.venv_demo`：
+项目里原有 `.venv` 已损坏，这里使用新的虚拟环境 `.venv_demo`。此外，需要先把官方 `segment-anything` 仓库拉到当前项目的 `segment-anything/` 目录下，供后端导出 ONNX 和加载 SAM 模型：
+
+```bash
+git clone https://github.com/facebookresearch/segment-anything.git segment-anything
+```
+
+然后安装 Python 依赖：
 
 ```bash
 python3 -m venv .venv_demo

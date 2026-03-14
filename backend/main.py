@@ -39,6 +39,11 @@ class AnnotationPayload(BaseModel):
     color: str | None = None
 
 
+class PredictMaskPayload(BaseModel):
+    clicks: list[dict[str, Any]] = Field(default_factory=list)
+    color: str | None = None
+
+
 class CompleteItemPayload(BaseModel):
     annotations: list[AnnotationPayload] = Field(default_factory=list)
     note: str | None = None
@@ -55,7 +60,9 @@ def prepare_demo_assets() -> None:
 
 @app.get("/api/bootstrap")
 def bootstrap(dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
-    return engine.bootstrap_payload(dataset)
+    payload = engine.bootstrap_payload(dataset)
+    payload["runtime"] = engine.runtime_payload()
+    return payload
 
 
 @app.get("/api/items/next")
@@ -63,7 +70,20 @@ def next_item(dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
     item = engine.next_pending(dataset)
     return {
         "dataset": dataset,
+        "runtime": engine.runtime_payload(),
         "progress": engine.get_progress(dataset),
+        "item": engine.serialize_item(item) if item else None,
+    }
+
+
+@app.get("/api/items/{item_id}/peek-next")
+def peek_next_item(item_id: str, dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
+    try:
+        item = engine.peek_next_pending(dataset, item_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "dataset": dataset,
         "item": engine.serialize_item(item) if item else None,
     }
 
@@ -86,6 +106,27 @@ def get_embedding(item_id: str, dataset: str = Query("diagram", pattern="^(diagr
     except Exception as exc:  # pragma: no cover - surfaced to UI
         raise HTTPException(status_code=500, detail=f"Failed to prepare embedding: {exc}") from exc
     return FileResponse(embedding_path, media_type="application/octet-stream")
+
+
+@app.post("/api/items/{item_id}/predict")
+def predict_mask(
+    item_id: str,
+    payload: PredictMaskPayload,
+    dataset: str = Query("diagram", pattern="^(diagram|plot)$"),
+):
+    try:
+        return engine.predict_mask(
+            dataset=dataset,
+            item_id=item_id,
+            clicks=payload.clicks,
+            color=payload.color or "#2e86ab",
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - surfaced to UI
+        raise HTTPException(status_code=500, detail=f"Failed to predict mask: {exc}") from exc
 
 
 @app.post("/api/items/{item_id}/complete")
@@ -133,8 +174,9 @@ if engine.demo_dist.exists():
 else:
     @app.get("/")
     def demo_not_built():
+        demo_root = engine.demo_root.relative_to(PROJECT_ROOT)
         return JSONResponse(
             {
-                "message": "Frontend build is missing. Run `npm install && npm run build` in segment-anything/demo`."
+                "message": f"Frontend build is missing. Run `npm install && npm run build` in `{demo_root}`."
             }
         )
