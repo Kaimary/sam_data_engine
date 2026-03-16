@@ -13,18 +13,15 @@
 ## 目录说明
 
 - `backend/`：FastAPI 后端，负责图片队列、embedding 缓存、自动 mask、交互式预测和标注保存
-- `segment-anything/demo/`：改造后的前端界面
+- `segment_anything/`：内置的 SAM Python 代码（从官方仓库 vendoring 进来）
+- `demo/`：前端界面
 - `outputs/embeddings/`：缓存的 `.npy` image embedding
 - `outputs/automatic_masks/`：缓存的整图自动 mask 结果
 - `outputs/annotations/`：保存的 mask PNG 和每张图的标注 JSON
 
 ## 环境准备
 
-项目里原有 `.venv` 已损坏，这里使用新的虚拟环境 `.venv_demo`。此外，需要先把官方 `segment-anything` 仓库拉到当前项目的 `segment-anything/` 目录下，供后端加载 SAM 模型：
-
-```bash
-git clone https://github.com/facebookresearch/segment-anything.git segment-anything
-```
+项目里原有 `.venv` 已损坏，这里使用新的虚拟环境 `.venv_demo`。当前仓库已经内置了运行所需的 SAM Python 代码和前端 demo，不再依赖额外 clone 官方 `segment-anything` 仓库。
 
 然后安装 Python 依赖：
 
@@ -37,14 +34,14 @@ pip install -r requirements.txt
 前端依赖：
 
 ```bash
-cd segment-anything/demo
+cd demo
 npm install --legacy-peer-deps
 ```
 
 ## 构建前端
 
 ```bash
-cd segment-anything/demo
+cd demo
 npm run build
 ```
 
@@ -88,7 +85,19 @@ SAM_RUNTIME_DEFAULT=browser python -m uvicorn backend.main:app --host 127.0.0.1 
 
 首次进入浏览器模式时，如果缺少量化后的 ONNX decoder，后端会自动生成：
 
-- `segment-anything/demo/model/<model_type>_assisted_manual_quantized.onnx`
+- `demo/model/<model_type>_assisted_manual_quantized.onnx`
+
+## 脱离官方仓库
+
+当前项目已经可以脱离原来的 `segment-anything/` git 仓库运行。保留在仓库内的只有：
+
+- `segment_anything/`：运行后端所需的最小 Python 包
+- `backend/export_onnx_model.py`：导出浏览器端 ONNX decoder 所需脚本
+- `demo/`：当前项目使用的前端
+- `SAM_LICENSE`：官方 SAM 代码的许可证副本
+- `THIRD_PARTY_NOTICES.md`：vendoring 来源说明
+
+确认本仓库能正常运行后，可以直接删除外层的 `segment-anything/` 目录。
 
 ## 标注输出
 

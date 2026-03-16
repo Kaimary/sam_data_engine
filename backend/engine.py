@@ -4,7 +4,6 @@ import base64
 import io
 import json
 import os
-import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +33,6 @@ class DataItem:
 class SamDataEngine:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
-        self.segment_root = project_root / "segment-anything"
         self.demo_root = self._resolve_demo_root()
         self.demo_dist = self.demo_root / "dist"
         self.demo_model_root = self.demo_root / "model"
@@ -70,10 +68,7 @@ class SamDataEngine:
         self.float_model_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _resolve_demo_root(self) -> Path:
-        local_demo_root = self.project_root / "demo"
-        if local_demo_root.exists():
-            return local_demo_root
-        return self.segment_root / "demo"
+        return self.project_root / "demo"
 
     def _resolve_checkpoint(self) -> Path:
         checkpoint_dir = self.project_root / "checkpoint"
@@ -250,8 +245,7 @@ class SamDataEngine:
             if self.quantized_model_path.exists():
                 return self.quantized_model_path
             self.demo_model_root.mkdir(parents=True, exist_ok=True)
-            sys.path.insert(0, str(self.segment_root))
-            from scripts.export_onnx_model import run_export
+            from backend.export_onnx_model import run_export
 
             print(f"[engine] exporting ONNX decoder to {self.float_model_path}")
             run_export(
@@ -296,7 +290,6 @@ class SamDataEngine:
     def _load_predictor(self):
         if self._predictor is not None:
             return self._predictor
-        sys.path.insert(0, str(self.segment_root))
         from segment_anything import SamPredictor, sam_model_registry
 
         device = self._get_device()
@@ -313,7 +306,6 @@ class SamDataEngine:
             return self._automatic_mask_generator
 
         predictor = self._load_predictor()
-        sys.path.insert(0, str(self.segment_root))
         from segment_anything import SamAutomaticMaskGenerator
 
         self._automatic_mask_generator = SamAutomaticMaskGenerator(
