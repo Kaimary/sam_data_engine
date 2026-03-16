@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 from PIL import Image
@@ -46,6 +47,7 @@ class SamDataEngine:
         self.model_type = self._infer_model_type(self.checkpoint_path.name)
         self.quantized_model_path = self.demo_model_root / f"{self.model_type}_assisted_manual_quantized.onnx"
         self.float_model_path = self.output_root / "models" / f"{self.model_type}_assisted_manual.onnx"
+        self.runtime_default = self._resolve_runtime_default()
         self._items = {
             "diagram": self._load_dataset("diagram"),
             "plot": self._load_dataset("plot"),
@@ -79,6 +81,13 @@ class SamDataEngine:
         if not candidates:
             raise FileNotFoundError(f"No checkpoint found in {checkpoint_dir}")
         return candidates[0]
+
+    @staticmethod
+    def _resolve_runtime_default() -> Literal["server", "browser"]:
+        raw_value = os.getenv("SAM_RUNTIME_DEFAULT", "server").strip().lower()
+        if raw_value not in {"server", "browser"}:
+            raise ValueError("SAM_RUNTIME_DEFAULT must be either 'server' or 'browser'")
+        return cast(Literal["server", "browser"], raw_value)
 
     @staticmethod
     def _infer_model_type(filename: str) -> str:
@@ -337,12 +346,29 @@ class SamDataEngine:
             print(f"[engine] cached embedding for {item.id} at {embedding_path}")
         return embedding_path
 
-    def runtime_payload(self) -> dict[str, str]:
+    def runtime_payload(self, mode: Literal["server", "browser"] | None = None) -> dict[str, str]:
+        active_mode = mode or self.runtime_default
+        if active_mode == "browser":
+            return {
+                "mode": "browser",
+                "defaultMode": self.runtime_default,
+                "location": "browser",
+                "device": "webgpu",
+                "label": "Browser WebGPU",
+                "interactiveLabel": "Browser WebGPU",
+                "automaticMaskLabel": "Server",
+                "modelUrl": "/api/runtime/browser-model.onnx",
+            }
         device = self._get_device()
         return {
+            "mode": "server",
+            "defaultMode": self.runtime_default,
             "location": "server",
             "device": device,
             "label": f"Server {device.upper()}",
+            "interactiveLabel": f"Server {device.upper()}",
+            "automaticMaskLabel": f"Server {device.upper()}",
+            "modelUrl": "/api/runtime/browser-model.onnx",
         }
 
     def _ensure_predictor_state(self, dataset: str, item_id: str):

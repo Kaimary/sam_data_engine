@@ -4,20 +4,23 @@
 
 - 自动从 `data/diagram/images` 或 `data/plot/images` 逐张取图
 - 后端用原始 SAM checkpoint 计算 image embedding 并缓存
-- 前端用源码导出的 lightweight ONNX mask decoder 做交互分割
-- 支持正负点提示、保存当前 mask、完成当前图后自动切换下一张
+- 图片加载完成后，后端会自动执行整图 mask 生成并缓存结果
+- 支持在启动时选择交互预测走 `server GPU` 或 `in-browser` WebGPU
+- automatic masks 仍由后端生成；浏览器模式只切换点选/框选的交互式预测路径
+- 支持在自动 masks 基础上继续正负点补标、框选补标、画刷修订、保存当前 mask、完成当前图后自动切换下一张
 - 标注结果保存到 `outputs/annotations`
 
 ## 目录说明
 
-- `backend/`：FastAPI 后端，负责图片队列、embedding 缓存、标注保存
+- `backend/`：FastAPI 后端，负责图片队列、embedding 缓存、自动 mask、交互式预测和标注保存
 - `segment-anything/demo/`：改造后的前端界面
 - `outputs/embeddings/`：缓存的 `.npy` image embedding
+- `outputs/automatic_masks/`：缓存的整图自动 mask 结果
 - `outputs/annotations/`：保存的 mask PNG 和每张图的标注 JSON
 
 ## 环境准备
 
-项目里原有 `.venv` 已损坏，这里使用新的虚拟环境 `.venv_demo`。此外，需要先把官方 `segment-anything` 仓库拉到当前项目的 `segment-anything/` 目录下，供后端导出 ONNX 和加载 SAM 模型：
+项目里原有 `.venv` 已损坏，这里使用新的虚拟环境 `.venv_demo`。此外，需要先把官方 `segment-anything` 仓库拉到当前项目的 `segment-anything/` 目录下，供后端加载 SAM 模型：
 
 ```bash
 git clone https://github.com/facebookresearch/segment-anything.git segment-anything
@@ -54,17 +57,38 @@ source .venv_demo/bin/activate
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 9000
 ```
 
+如果希望默认进入浏览器推理模式，可以在启动时设置：
+
+```bash
+source .venv_demo/bin/activate
+SAM_RUNTIME_DEFAULT=browser python -m uvicorn backend.main:app --host 127.0.0.1 --port 9000
+```
+
 打开：
 
 - [http://127.0.0.1:9000](http://127.0.0.1:9000)
 
-首次启动时如果缺少 ONNX 文件，后端会自动基于 `checkpoint/` 下的 checkpoint 导出并量化：
+也可以直接通过 URL 指定启动模式：
 
-- `segment-anything/demo/model/vit_h_assisted_manual_quantized.onnx`
+- `http://127.0.0.1:9000/?runtime=server`
+- `http://127.0.0.1:9000/?runtime=browser`
+
+进入页面后，左侧 Runtime 卡片也可以继续切换：
+
+- `Server GPU`：交互式预测走后端 SAM predictor
+- `In-browser`：交互式预测走浏览器端 ONNX + WebGPU，若浏览器不支持 WebGPU 会回退到 WASM
 
 首次打开某张图时，后端会自动生成对应 embedding，并缓存到：
 
 - `outputs/embeddings/<dataset>/<item_id>.npy`
+
+首次打开某张图时，后端还会自动生成整图 masks，并缓存到：
+
+- `outputs/automatic_masks/<dataset>/<item_id>/`
+
+首次进入浏览器模式时，如果缺少量化后的 ONNX decoder，后端会自动生成：
+
+- `segment-anything/demo/model/<model_type>_assisted_manual_quantized.onnx`
 
 ## 标注输出
 
@@ -75,7 +99,6 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 9000
 
 ## 已验证内容
 
-- 成功导出并量化 ONNX decoder
 - 成功构建前端 webpack 产物
 - 成功生成 `diagram` 数据首张图的 image embedding
 - 成功通过 API 保存一条标注并自动切换到下一张图

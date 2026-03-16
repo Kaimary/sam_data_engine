@@ -56,18 +56,24 @@ class SkipItemPayload(BaseModel):
 
 
 @app.get("/api/bootstrap")
-def bootstrap(dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
+def bootstrap(
+    dataset: str = Query("diagram", pattern="^(diagram|plot)$"),
+    runtime: str | None = Query(None, pattern="^(server|browser)$"),
+):
     payload = engine.bootstrap_payload(dataset)
-    payload["runtime"] = engine.runtime_payload()
+    payload["runtime"] = engine.runtime_payload(runtime)
     return payload
 
 
 @app.get("/api/items/next")
-def next_item(dataset: str = Query("diagram", pattern="^(diagram|plot)$")):
+def next_item(
+    dataset: str = Query("diagram", pattern="^(diagram|plot)$"),
+    runtime: str | None = Query(None, pattern="^(server|browser)$"),
+):
     item = engine.next_pending(dataset)
     return {
         "dataset": dataset,
-        "runtime": engine.runtime_payload(),
+        "runtime": engine.runtime_payload(runtime),
         "progress": engine.get_progress(dataset),
         "item": engine.serialize_item(item) if item else None,
     }
@@ -103,6 +109,15 @@ def get_embedding(item_id: str, dataset: str = Query("diagram", pattern="^(diagr
     except Exception as exc:  # pragma: no cover - surfaced to UI
         raise HTTPException(status_code=500, detail=f"Failed to prepare embedding: {exc}") from exc
     return FileResponse(embedding_path, media_type="application/octet-stream")
+
+
+@app.get("/api/runtime/browser-model.onnx")
+def get_browser_model():
+    try:
+        model_path = engine.ensure_quantized_model()
+    except Exception as exc:  # pragma: no cover - surfaced to UI
+        raise HTTPException(status_code=500, detail=f"Failed to prepare browser model: {exc}") from exc
+    return FileResponse(model_path, media_type="application/octet-stream")
 
 
 @app.post("/api/items/{item_id}/predict")
@@ -141,6 +156,7 @@ def complete_item(
     item_id: str,
     payload: CompleteItemPayload,
     dataset: str = Query("diagram", pattern="^(diagram|plot)$"),
+    runtime: str | None = Query(None, pattern="^(server|browser)$"),
 ):
     try:
         result = engine.save_annotations(
@@ -152,7 +168,7 @@ def complete_item(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    next_payload = next_item(dataset)
+    next_payload = next_item(dataset, runtime)
     return {"saved": result, **next_payload}
 
 
@@ -161,6 +177,7 @@ def skip_item(
     item_id: str,
     payload: SkipItemPayload,
     dataset: str = Query("diagram", pattern="^(diagram|plot)$"),
+    runtime: str | None = Query(None, pattern="^(server|browser)$"),
 ):
     try:
         result = engine.save_annotations(
@@ -172,7 +189,7 @@ def skip_item(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    next_payload = next_item(dataset)
+    next_payload = next_item(dataset, runtime)
     return {"saved": result, **next_payload}
 
 
